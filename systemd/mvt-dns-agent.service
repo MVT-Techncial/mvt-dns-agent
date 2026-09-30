@@ -1,0 +1,9 @@
+[Unit]
+Description=MVT DNS AdGuard Collector
+After=network-online.target AdGuardHome.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/mvt-dns-agent/collector.py
+User=root
