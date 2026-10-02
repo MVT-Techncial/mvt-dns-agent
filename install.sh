@@ -94,8 +94,18 @@ EXPECTED=$(awk -v f="$AGH_ASSET" '$NF == f || $NF == "*" f || $NF == "./" f {pri
 printf '%s  %s\n' "$EXPECTED" "$WORK/$AGH_ASSET" | sha256sum -c - >/dev/null || \
   die 'AdGuard download checksum mismatch.'
 tar -tzf "$WORK/$AGH_ASSET" > "$WORK/archive-list.txt" || die 'AdGuard archive is unreadable.'
-grep -qx 'AdGuardHome/AdGuardHome' "$WORK/archive-list.txt" || \
-  die 'AdGuard archive layout unexpected.'
+if ! sed 's#^\./##' "$WORK/archive-list.txt" | \
+  grep -qx 'AdGuardHome/AdGuardHome'; then
+
+    echo
+    echo "AdGuard archive layout validation failed."
+    echo "First 20 archive entries:"
+    echo "----------------------------------------"
+    head -n 20 "$WORK/archive-list.txt"
+    echo "----------------------------------------"
+
+    die 'AdGuard archive layout unexpected.'
+fi
 
 say 'Checking standard AdGuard ports (53/TCP+UDP, 80/TCP, 3000/TCP)...'
 python3 - <<'PY' || die 'Resolve local port conflicts before onboarding.'
