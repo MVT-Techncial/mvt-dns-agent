@@ -6,6 +6,7 @@ import json
 import socket
 import sqlite3
 import subprocess
+import time
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
@@ -14,11 +15,14 @@ from datetime import datetime, timezone
 CONFIG_FILE = "/opt/mvt-dns-agent/config.env"
 DB_FILE = "/opt/mvt-dns-agent/queue.db"
 
-AGENT_VERSION = "0.2.1"
+AGENT_VERSION = "0.2.2"
 
 ADGUARD_PAGE_SIZE = 500
 UPLOAD_BATCH_SIZE = 500
 MAX_PAGES_PER_RUN = 1000
+
+HEARTBEAT_DURING_BACKLOG_SECONDS = 60
+BACKLOG_PROGRESS_BATCHES = 10
 
 
 # =========================================================
@@ -399,9 +403,7 @@ def harvest_adguard(
 
             if (
                 last_harvested_dt
-                and
-                event_dt
-                <= last_harvested_dt
+                and event_dt <= last_harvested_dt
             ):
                 reached_cursor = True
                 continue
@@ -445,11 +447,9 @@ def harvest_adguard(
 
         if (
             not last_harvested_dt
-            or
-            parse_time(
+            or parse_time(
                 newest_seen
-            )
-            > last_harvested_dt
+            ) > last_harvested_dt
         ):
 
             set_state(
@@ -511,6 +511,13 @@ def send_batch(
         "events": events
     })
 
+    # Important:
+    # Send the JSON payload to curl over stdin rather than
+    # placing the entire payload on the command line.
+    #
+    # This avoids Linux "Argument list too long" failures
+    # with larger 500-event batches.
+
     result = subprocess.run(
         [
             "curl",
@@ -530,9 +537,10 @@ def send_batch(
             f'{config["MVT_API_KEY"]}',
 
             "--data-binary",
-            payload,
+            "@-",
         ],
 
+        input=payload,
         capture_output=True,
         text=True,
         timeout=60,
@@ -633,6 +641,9 @@ def drain_queue(
     config,
     db
 ):
+    batches_uploaded = 0
+    last_heartbeat = time.monotonic()
+
     while True:
 
         ids, events = (
@@ -661,6 +672,46 @@ def drain_queue(
             db,
             ids
         )
+
+        batches_uploaded += 1
+
+        # Show useful progress during a large backlog.
+        if (
+            batches_uploaded
+            % BACKLOG_PROGRESS_BATCHES
+            == 0
+        ):
+
+            remaining = queue_count(
+                db
+            )
+
+            print(
+                f"Backlog progress: "
+                f"{remaining} queued event(s) remaining"
+            )
+
+        # Keep the Portal heartbeat alive even if draining
+        # the local SQLite backlog takes several minutes.
+        if (
+            time.monotonic()
+            - last_heartbeat
+            >= HEARTBEAT_DURING_BACKLOG_SECONDS
+        ):
+
+            print(
+                "Sending heartbeat during "
+                "backlog recovery..."
+            )
+
+            send_heartbeat(
+                config,
+                db
+            )
+
+            last_heartbeat = (
+                time.monotonic()
+            )
 
     print(
         f"Local queue remaining: "
@@ -970,9 +1021,9 @@ def sync_filtering_config(
             "synced"
         )
 
-        # Upgrade path from agent 0.2.0.
-        # Earlier versions stored the applied
-        # version but not last_config_sync.
+        # Upgrade compatibility for older agents that
+        # already stored an applied version but had not
+        # recorded last_config_sync.
 
         if not get_state(
             db,
@@ -1339,6 +1390,16 @@ def main():
             f"{queue_count(db)}"
         )
 
+        # Important:
+        # Tell the Portal the appliance is alive BEFORE
+        # potentially spending several minutes draining
+        # a large DNS event backlog.
+
+        send_heartbeat(
+            config,
+            db
+        )
+
         drain_queue(
             config,
             db
@@ -1348,6 +1409,9 @@ def main():
             config,
             db
         )
+
+        # Final heartbeat reports the latest filtering
+        # configuration and appliance status.
 
         send_heartbeat(
             config,
